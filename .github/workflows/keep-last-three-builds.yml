@@ -1,0 +1,123 @@
+name: Keep last three builds
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/keep-last-three-builds.yml']
+  workflow_run:
+    workflows:
+      - Universal Signal tvOS - Full Source ZIP to IPA
+      - 00 Build tvOS IPA From Source ZIP - XcodeGen Auto Build
+      - pages build and deployment
+    types: [requested, completed]
+
+permissions:
+  actions: write
+
+concurrency:
+  group: signal-build-retention
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.repository == 'Skylinejay187/SignalUnityTV'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Keep newest three builds and protect active runs
+        shell: bash
+        run: |
+          python3 -u - <<'PY_CLEANUP'
+          import json, os, time, urllib.request, urllib.error
+          
+          REPO = os.environ['GITHUB_REPOSITORY']
+          assert REPO == 'Skylinejay187/SignalUnityTV', 'Unexpected repository'
+          TOKEN = os.environ['GH_TOKEN']
+          SELF = int(os.environ['GITHUB_RUN_ID'])
+          PATH = '.github/workflows/keep-last-three-builds.yml'
+          BASE = 'https://api.github.com/repos/' + REPO
+          remaining, reset = 1, 0
+          
+          def api(method, path):
+              global remaining, reset
+              for attempt in range(8):
+                  if remaining == 0:
+                      delay = max(1, reset - time.time() + 3)
+                      print(f'GitHub API limit reached; waiting {delay:.0f}s before resuming.', flush=True)
+                      time.sleep(delay)
+                  request = urllib.request.Request(BASE + path, method=method, headers={
+                      'Authorization': 'Bearer ' + TOKEN,
+                      'Accept': 'application/vnd.github+json',
+                      'X-GitHub-Api-Version': '2022-11-28'})
+                  try:
+                      with urllib.request.urlopen(request, timeout=45) as response:
+                          remaining = int(response.headers.get('X-RateLimit-Remaining', '1'))
+                          reset = int(response.headers.get('X-RateLimit-Reset', '0'))
+                          body = response.read()
+                          return json.loads(body) if body else None
+                  except urllib.error.HTTPError as error:
+                      remaining = int(error.headers.get('X-RateLimit-Remaining', '1'))
+                      reset = int(error.headers.get('X-RateLimit-Reset', '0'))
+                      if error.code == 404: return None
+                      if method == 'DELETE' and error.code in (403, 409, 422) and remaining > 0 and not error.headers.get('Retry-After'):
+                          current = api('GET', path)
+                          if current and current.get('status') != 'completed':
+                              print('Protected newly active run ' + str(current['id']), flush=True)
+                              return 'active'
+                      if remaining == 0: continue
+                      if error.code in (429, 500, 502, 503, 504) or (error.code == 403 and error.headers.get('Retry-After')):
+                          delay = max(int(error.headers.get('Retry-After', '0')), min(120, 2 ** attempt * 3))
+                          print(f'GitHub temporarily throttled request ({error.code}); retrying in {delay}s.', flush=True)
+                          time.sleep(delay)
+                          continue
+                      raise RuntimeError(f'GitHub {method} {path} failed with HTTP {error.code}') from None
+              raise RuntimeError('GitHub request did not succeed after retries')
+          
+          def runs():
+              result = {}
+              page = 1
+              while True:
+                  data = api('GET', f'/actions/runs?per_page=100&page={page}')
+                  if not data or 'workflow_runs' not in data: raise RuntimeError('Cannot list runs; deleting nothing')
+                  batch = data['workflow_runs']
+                  result.update((int(run['id']), run) for run in batch)
+                  if len(batch) < 100: break
+                  page += 1
+              return list(result.values())
+          
+          def plan(all_runs, own_id, own_path):
+              builds = sorted((run for run in all_runs if run.get('path', '').split('@')[0] != own_path),
+                              key=lambda run: (run['created_at'], int(run['id'])), reverse=True)
+              keep = {int(run['id']) for run in builds[:3]}
+              # Never cancel a queued or running workflow to enforce a count.
+              keep.update(int(run['id']) for run in all_runs if run['status'] != 'completed')
+              keep.add(own_id)
+              delete = [run for run in all_runs if int(run['id']) not in keep and run['status'] == 'completed']
+              return builds[:3], sorted(delete, key=lambda run: (run['created_at'], int(run['id'])), reverse=True)
+          
+          deleted = 0
+          for cycle in range(5):
+              latest, candidates = plan(runs(), SELF, PATH)
+              print('Keeping newest three builds: ' + json.dumps([{'id':r['id'], 'name':r['name'], 'status':r['status']} for r in latest]), flush=True)
+              print(f'Cleanup pass {cycle+1}: {len(candidates)} completed old runs selected.', flush=True)
+              if not candidates: break
+              for run in candidates:
+                  result = api('DELETE', '/actions/runs/' + str(int(run['id'])))
+                  if result != 'active': deleted += 1
+                  if deleted % 25 == 0: print(f'Deleted {deleted} older runs so far.', flush=True)
+                  time.sleep(1.1)
+          else:
+              raise RuntimeError('Run history kept changing; another cleanup pass is required')
+          
+          latest, leftovers = plan(runs(), SELF, PATH)
+          summary = ['## Build retention', f'Deleted older workflow runs: **{deleted}**.',
+                     'Kept newest three build runs (including queued/running builds):']
+          summary += [f"- [{r['name']} #{r['run_number']}]({r['html_url']}) — {r['status']}" for r in latest]
+          summary += ['All other active runs are protected until they finish. The maintenance run itself does not consume a build slot.']
+          if leftovers: raise RuntimeError('Completed older runs still remain; rerun cleanup')
+          print('\n'.join(summary), flush=True)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out: out.write('\n'.join(summary) + '\n')
+          PY_CLEANUP
