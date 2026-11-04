@@ -14,7 +14,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: signal-zip-${{ github.ref }}
+  # Keep individual runs independent so a stuck prior build cannot queue a new one.
+  group: signal-zip-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
