@@ -48,7 +48,7 @@ jobs:
           def natural_key(path):
               import re
               return [int(part) if part.isdigit() else part.lower()
-                      for part in re.split(r'(\\d+)', path.name)]
+                      for part in re.split(r'(\d+)', path.name)]
           candidates.sort(key=lambda p: (p.name in changed, natural_key(p)), reverse=True)
           valid = []
           for p in candidates:
