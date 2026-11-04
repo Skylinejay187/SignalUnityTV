@@ -25,7 +25,7 @@ jobs:
       - name: Checkout selected branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Locate newest committed source ZIP
         id: source
@@ -38,11 +38,17 @@ jobs:
           candidates = [p for p in Path('.').glob('*.zip') if p.is_file()]
           if not candidates:
               raise SystemExit('No source ZIP in repository root. Upload one full project ZIP.')
-          history = subprocess.check_output(['git','log','--all','--format=','--name-only','--','*.zip'],text=True).splitlines()
-          order = {}
-          for i, name in enumerate(x.strip() for x in history if x.strip()):
-              order.setdefault(name, i)
-          candidates.sort(key=lambda p: order.get(p.name,10**9))
+          # Shallow checkout does not contain historical ZIP commits.
+          # Prefer a ZIP changed by the triggering commit, otherwise use
+          # a deterministic natural filename order for manual dispatch.
+          changed = set(subprocess.check_output(
+              ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'],
+              text=True).splitlines())
+          def natural_key(path):
+              import re
+              return [int(part) if part.isdigit() else part.lower()
+                      for part in re.split(r'(\\d+)', path.name)]
+          candidates.sort(key=lambda p: (p.name in changed, natural_key(p)), reverse=True)
           valid = []
           for p in candidates:
               try:
