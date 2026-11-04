@@ -79,6 +79,26 @@ jobs:
           echo "SOURCE_DIR=$DIR" >> "$GITHUB_ENV"
           echo "Project root: $DIR"
 
+      - name: Select newest installed Xcode with tvOS SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          # AetherEngine 7.44.0 uses APIs absent from Xcode 16.4.
+          # Prefer Xcode 26 when present, but do not assume the image has it.
+          selected="$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' | sort -V | tail -n 1)"
+          if [ -n "$selected" ]; then
+            echo "DEVELOPER_DIR=$selected/Contents/Developer" >> "$GITHUB_ENV"
+            export DEVELOPER_DIR="$selected/Contents/Developer"
+          fi
+          xcodebuild -version
+          sdk="$(xcrun --sdk appletvos --show-sdk-version)"
+          echo "tvOS SDK: $sdk"
+          major="${sdk%%.*}"
+          if [ "$major" -lt 26 ]; then
+            echo "::error::AetherEngine 7.44.0 requires a newer Apple SDK than tvOS $sdk for its current APIs. This runner has no compatible Xcode 26 installation. Choose an image with Xcode 26 or apply verified engine compatibility changes."
+            exit 1
+          fi
+
       - name: Xcode and source checks
         shell: bash
         run: |
