@@ -99,10 +99,29 @@ jobs:
             exit 1
           fi
 
+      # Cache only fetched Swift package repositories, not DerivedData or compiled
+      # objects. Xcode still rebuilds every target against the selected SDK.
+      - name: Initialize timing report
+        shell: bash
+        run: |
+          echo "### Signal tvOS build-stage timings" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Stage | Duration | Exit code |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---:|---:|" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore Swift package download cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/signal-spm-clones
+          key: signal-spm-macos26-intel-${{ hashFiles('*.zip') }}
+          restore-keys: |
+            signal-spm-macos26-intel-
+
       - name: Xcode and source checks
         shell: bash
         run: |
           set -euo pipefail
+          stage_started=$SECONDS
+          trap 'rc=$?; echo "| Xcode and source checks | $((SECONDS-stage_started))s | $rc |" >> "$GITHUB_STEP_SUMMARY"' EXIT
           xcodebuild -version
           xcrun --sdk appletvos --show-sdk-version
           if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
@@ -114,6 +133,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          stage_started=$SECONDS
+          trap 'rc=$?; echo "| Install project engine when requested | $((SECONDS-stage_started))s | $rc |" >> "$GITHUB_STEP_SUMMARY"' EXIT
           cd "$SOURCE_DIR"
           if [ -f Scripts/fetch_aether_f28_744.sh ]; then
             bash Scripts/fetch_aether_f28_744.sh > "$GITHUB_WORKSPACE/engine-install.log" 2>&1 || { tail -n 100 "$GITHUB_WORKSPACE/engine-install.log"; exit 1; }
@@ -123,6 +144,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          stage_started=$SECONDS
+          trap 'rc=$?; echo "| Generate Xcode project | $((SECONDS-stage_started))s | $rc |" >> "$GITHUB_STEP_SUMMARY"' EXIT
           cd "$SOURCE_DIR"
           xcodegen generate --spec project.yml 2>&1 | tee "$GITHUB_WORKSPACE/project-generation.log"
 
@@ -130,6 +153,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          stage_started=$SECONDS
+          trap 'rc=$?; echo "| Build unsigned tvOS app | $((SECONDS-stage_started))s | $rc |" >> "$GITHUB_STEP_SUMMARY"' EXIT
           cd "$SOURCE_DIR"
           PROJECT="$(find . -maxdepth 2 -name '*.xcodeproj' -type d | head -n 1)"
           test -n "$PROJECT" || { echo '::error::No Xcode project generated'; exit 1; }
@@ -143,12 +168,14 @@ jobs:
           PY
           )"
           echo "Building scheme: $SCHEME"
-          xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration Release -sdk appletvos -destination 'generic/platform=tvOS' -derivedDataPath "$RUNNER_TEMP/signal-derived" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build > "$GITHUB_WORKSPACE/tvos-build.log" 2>&1 || { grep -nE 'error:|BUILD FAILED|warning:' "$GITHUB_WORKSPACE/tvos-build.log" | tail -n 100 || true; exit 1; }
+          xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration Release -sdk appletvos -destination 'generic/platform=tvOS' -derivedDataPath "$RUNNER_TEMP/signal-derived" -clonedSourcePackagesDirPath "$RUNNER_TEMP/signal-spm-clones" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build > "$GITHUB_WORKSPACE/tvos-build.log" 2>&1 || { grep -nE 'error:|BUILD FAILED|warning:' "$GITHUB_WORKSPACE/tvos-build.log" | tail -n 100 || true; exit 1; }
 
       - name: Package unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
+          stage_started=$SECONDS
+          trap 'rc=$?; echo "| Package unsigned IPA | $((SECONDS-stage_started))s | $rc |" >> "$GITHUB_STEP_SUMMARY"' EXIT
           APP="$(find "$RUNNER_TEMP/signal-derived/Build/Products/Release-appletvos" -maxdepth 1 -type d -name '*.app' ! -name '*TopShelf*' | head -n 1)"
           test -n "$APP" || { echo '::error::Built tvOS .app not found'; exit 1; }
           mkdir -p Payload
